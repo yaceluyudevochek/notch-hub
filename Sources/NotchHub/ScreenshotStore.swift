@@ -16,6 +16,9 @@ final class ScreenshotStore: ObservableObject {
     private let query = NSMetadataQuery()
     private var folderWatcher: DispatchSourceFileSystemObject?
     private var thumbnails: [URL: NSImage] = [:]
+    /// Работа с файлами — в фоне: первый доступ к «Рабочему столу» ждёт ответа на запрос
+    /// приватности macOS, и на главном потоке это замораживало бы всё приложение.
+    private let fileQueue = DispatchQueue(label: "notchhub.screenshots", qos: .utility)
 
     /// Папка из настроек «Снимок экрана» (по умолчанию — Рабочий стол).
     var screenshotFolder: URL {
@@ -39,12 +42,14 @@ final class ScreenshotStore: ObservableObject {
                                                name: .NSMetadataQueryDidUpdate, object: query)
         query.start()
 
-        watchFolder()
+        let folder = screenshotFolder
+        fileQueue.async { [weak self] in self?.watchFolder(folder) }
         refresh()
     }
 
     @objc func refresh() {
         var found: [URL: Date] = [:]
+        let folder = screenshotFolder
 
         query.disableUpdates()
         for case let item as NSMetadataItem in query.results.prefix(limit) {
@@ -55,22 +60,25 @@ final class ScreenshotStore: ObservableObject {
         query.enableUpdates()
 
         // Spotlight может отставать или быть выключен — дополняем сканированием папки.
-        for (url, date) in scanFolder() { found[url] = date }
-
-        let fresh = found
-            .filter { FileManager.default.fileExists(atPath: $0.key.path) }
-            .map { Screenshot(url: $0.key, date: $0.value) }
-            .sorted { $0.date > $1.date }
-            .prefix(limit)
-
-        let list = Array(fresh)
-        if list != items { items = list }
+        let limit = self.limit
+        fileQueue.async { [weak self] in
+            for (url, date) in Self.scanFolder(folder) { found[url] = date }
+            let list = Array(found
+                .filter { FileManager.default.fileExists(atPath: $0.key.path) }
+                .map { Screenshot(url: $0.key, date: $0.value) }
+                .sorted { $0.date > $1.date }
+                .prefix(limit))
+            DispatchQueue.main.async {
+                guard let self, list != self.items else { return }
+                self.items = list
+            }
+        }
     }
 
-    private func scanFolder() -> [(URL, Date)] {
+    private static func scanFolder(_ folder: URL) -> [(URL, Date)] {
         let keys: [URLResourceKey] = [.creationDateKey, .isRegularFileKey]
         guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: screenshotFolder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
+            at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
         ) else { return [] }
 
         let exts: Set<String> = ["png", "jpg", "jpeg", "heic", "tiff", "pdf", "mov"]
@@ -86,8 +94,8 @@ final class ScreenshotStore: ObservableObject {
         getxattr(url.path, "com.apple.metadata:kMDItemIsScreenCapture", nil, 0, 0, 0) > 0
     }
 
-    private func watchFolder() {
-        let fd = Darwin.open(screenshotFolder.path, O_EVTONLY)
+    private func watchFolder(_ folder: URL) {
+        let fd = Darwin.open(folder.path, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: .main)
         source.setEventHandler { [weak self] in
@@ -96,7 +104,7 @@ final class ScreenshotStore: ObservableObject {
         }
         source.setCancelHandler { close(fd) }
         source.resume()
-        folderWatcher = source
+        DispatchQueue.main.async { [weak self] in self?.folderWatcher = source }
     }
 
     // MARK: - Действия

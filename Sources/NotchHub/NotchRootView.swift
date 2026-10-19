@@ -101,37 +101,114 @@ private struct LiveActivityView: View {
 
             Color.clear.frame(width: notchWidth)
 
-            EqualizerBars(isPlaying: nowPlaying.isActive, color: .white)
+            EqualizerBars(isPlaying: nowPlaying.isActive)
                 .frame(width: 18, height: 14)
                 .frame(maxWidth: .infinity)
         }
     }
 }
 
-/// Анимированный эквалайзер — плавные синусоиды, «засыпает» на паузе.
+/// Анимированный эквалайзер. Анимацию крутит Core Animation в системном рендер-сервере,
+/// поэтому во время воспроизведения приложение не перерисовывает SwiftUI каждый кадр.
 struct EqualizerBars: View {
     let isPlaying: Bool
-    var color: Color = .white
+    var color: NSColor = .white
     var count = 4
 
     var body: some View {
-        TimelineView(.animation(paused: !isPlaying)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
+        if Snapshot.isRendering {
+            // ImageRenderer не рисует NSView — для картинок статичный кадр.
             GeometryReader { geo in
-                HStack(alignment: .center, spacing: geo.size.width * 0.12) {
+                HStack(spacing: geo.size.width * 0.12) {
                     ForEach(0..<count, id: \.self) { i in
-                        let phase = Double(i) * 1.7
-                        let wave = (sin(t * (5.2 + Double(i) * 1.3) + phase) + 1) / 2
-                        let height = isPlaying ? 0.25 + 0.75 * wave : 0.18
-                        Capsule()
-                            .fill(color)
-                            .frame(height: geo.size.height * height)
+                        Capsule().fill(Color(nsColor: color))
+                            .frame(height: geo.size.height * [0.55, 1, 0.4, 0.75][i % 4])
                             .frame(maxHeight: .infinity)
                     }
                 }
             }
+        } else {
+            EqualizerLayerView(isPlaying: isPlaying, color: color, count: count)
         }
-        .animation(.easeOut(duration: 0.3), value: isPlaying)
+    }
+}
+
+private struct EqualizerLayerView: NSViewRepresentable {
+    let isPlaying: Bool
+    let color: NSColor
+    let count: Int
+
+    func makeNSView(context: Context) -> EqualizerNSView {
+        EqualizerNSView(count: count, color: color)
+    }
+
+    func updateNSView(_ view: EqualizerNSView, context: Context) {
+        view.setPlaying(isPlaying)
+    }
+}
+
+final class EqualizerNSView: NSView {
+    private var bars: [CALayer] = []
+    private var playing = false
+    private let durations: [CFTimeInterval] = [0.42, 0.55, 0.37, 0.49, 0.6]
+
+    init(count: Int, color: NSColor) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        for _ in 0..<count {
+            let bar = CALayer()
+            bar.backgroundColor = color.cgColor
+            bar.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+            layer?.addSublayer(bar)
+            bars.append(bar)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let gap = bounds.width * 0.12
+        let w = (bounds.width - gap * CGFloat(bars.count - 1)) / CGFloat(bars.count)
+        for (i, bar) in bars.enumerated() {
+            bar.bounds = CGRect(x: 0, y: 0, width: w, height: bounds.height)
+            bar.position = CGPoint(x: CGFloat(i) * (w + gap) + w / 2, y: bounds.midY)
+            bar.cornerRadius = w / 2
+        }
+        CATransaction.commit()
+        applyAnimations()
+    }
+
+    func setPlaying(_ value: Bool) {
+        guard value != playing else { return }
+        playing = value
+        applyAnimations()
+    }
+
+    private func applyAnimations() {
+        for (i, bar) in bars.enumerated() {
+            bar.removeAnimation(forKey: "bounce")
+            let rest: CGFloat = 0.18
+            if playing {
+                let anim = CABasicAnimation(keyPath: "transform.scale.y")
+                anim.fromValue = 0.25
+                anim.toValue = 1.0
+                anim.duration = durations[i % durations.count]
+                anim.autoreverses = true
+                anim.repeatCount = .infinity
+                anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                anim.timeOffset = Double(i) * 0.17
+                bar.transform = CATransform3DMakeScale(1, 0.6, 1)
+                bar.add(anim, forKey: "bounce")
+            } else {
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(0.3)
+                bar.transform = CATransform3DMakeScale(1, rest, 1)
+                CATransaction.commit()
+            }
+        }
     }
 }
 

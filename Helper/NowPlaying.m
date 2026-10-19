@@ -49,7 +49,7 @@ void nh_stream(void) {
     __block NSUInteger lastArtworkHash = 0;
 
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
-    dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, NSEC_PER_SEC, NSEC_PER_SEC / 10);
+    dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, NSEC_PER_SEC, NSEC_PER_SEC / 2);
     dispatch_source_set_event_handler(timer, ^{
         getPID(queue, ^(int pid) {
             getIsPlaying(queue, ^(Boolean playing) {

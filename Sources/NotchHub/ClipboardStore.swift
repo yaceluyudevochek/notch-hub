@@ -48,6 +48,7 @@ final class ClipboardStore: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.poll()
         }
+        timer?.tolerance = 0.25
         RunLoop.main.add(timer!, forMode: .common)
     }
 

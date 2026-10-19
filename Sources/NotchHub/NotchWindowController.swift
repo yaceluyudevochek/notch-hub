@@ -80,7 +80,8 @@ final class NotchPanel: NSPanel {
 final class NotchWindowController {
     private let panel: NotchPanel
     private let model = NotchViewModel()
-    private var mouseTimer: Timer?
+    private var mouseMonitors: [Any] = []
+    private var pendingCheck: DispatchWorkItem?
     private var outsideSince: Date?
     private var insideSince: Date?
     private var cancellables = Set<AnyCancellable>()
@@ -111,10 +112,31 @@ final class NotchWindowController {
     func show() {
         panel.orderFrontRegardless()
         panel.ignoresMouseEvents = true
-        mouseTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+
+        // Реагируем на движение курсора, а не опрашиваем его по таймеру:
+        // пока мышь неподвижна, приложение не просыпается вовсе.
+        // Глобальный монитор видит события других приложений, локальный — нашей панели.
+        let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged,
+                                           .leftMouseUp, .rightMouseUp]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] _ in
             self?.trackMouse()
+        }) {
+            mouseMonitors.append(global)
         }
-        RunLoop.main.add(mouseTimer!, forMode: .common)
+        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            self?.trackMouse()
+            return event
+        }) {
+            mouseMonitors.append(local)
+        }
+    }
+
+    /// Повторная проверка через `delay` — чтобы задержки срабатывали и без нового движения мыши.
+    private func recheck(after delay: TimeInterval) {
+        pendingCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.trackMouse() }
+        pendingCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// Экран со «челкой» (или основной, если такого нет).
@@ -171,9 +193,11 @@ final class NotchWindowController {
             if area.contains(mouse) || NSEvent.pressedMouseButtons != 0 {
                 outsideSince = nil
             } else if let since = outsideSince {
-                if Date().timeIntervalSince(since) > 0.25 { setExpanded(false) }
+                let left = 0.25 - Date().timeIntervalSince(since)
+                if left <= 0 { setExpanded(false) } else { recheck(after: left) }
             } else {
                 outsideSince = Date()
+                recheck(after: 0.25)
             }
         } else {
             let collapsed = model.collapsedSize
@@ -186,9 +210,11 @@ final class NotchWindowController {
 
             if hot.contains(mouse), NSEvent.pressedMouseButtons == 0 {
                 if let since = insideSince {
-                    if Date().timeIntervalSince(since) > 0.08 { setExpanded(true) }
+                    let left = 0.08 - Date().timeIntervalSince(since)
+                    if left <= 0 { setExpanded(true) } else { recheck(after: left) }
                 } else {
                     insideSince = Date()
+                    recheck(after: 0.08)
                 }
             } else {
                 insideSince = nil
@@ -198,6 +224,7 @@ final class NotchWindowController {
 
     private func setExpanded(_ expanded: Bool) {
         guard model.isExpanded != expanded else { return }
+        pendingCheck?.cancel()
         outsideSince = nil
         insideSince = nil
         panel.ignoresMouseEvents = !expanded
